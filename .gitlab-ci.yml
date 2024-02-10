@@ -1,0 +1,73 @@
+image: maven:3.8.4-openjdk-17
+variables:
+  ARTIFACT_NAME: JVSpring-api-V$CI_PIPELINE_IID.jar
+  APP_NAME: JVSpring-api
+
+stages:
+  - build
+  - test
+  - deploy
+
+build:
+  stage: build
+  script:
+    - cd springapi
+    - mvn package
+    - sed -i "s#CI_PIPELINE_IID#$CI_PIPELINE_IID#" ./src/main/resources/application.properties
+    - sed -i "s#CI_COMMIT_SHORT_SHA#$CI_COMMIT_SHORT_SHA#" ./src/main/resources/application.properties
+    - sed -i "s#CI_COMMIT_BRANCH#$CI_COMMIT_BRANCH#" ./src/main/resources/application.properties
+    - mv ./target/springapi-0.0.1-SNAPSHOT.jar ./target/$ARTIFACT_NAME
+  artifacts:
+    paths:
+      - ./springapi/target
+
+smoke test:
+  stage: test
+  script:
+#    - cd springapi
+#    - mvn spring-boot:run &
+    - java -jar ./springapi/target/$ARTIFACT_NAME &
+    - sleep 30
+    - curl http://localhost:5000/web/home | grep "Welcome"
+deploy:
+  stage: deploy
+  image:
+    name: amazon/aws-cli
+    entrypoint: [""]
+  script:
+    - echo "$AWS_DEFAULT_REGION"
+    - aws configure set region $AWS_DEFAULT_REGION
+    # - aws s3 mb s3://$S3_BUCKET
+  
+    - if ! aws s3 ls "s3://$S3_BUCKET" >/dev/null 2>&1; then
+        echo "S3 bucket does not exist. Creating...";
+        aws s3 mb "s3://$S3_BUCKET";
+      fi
+
+    - aws s3 cp ./springapi/target/$ARTIFACT_NAME s3://$S3_BUCKET/$ARTIFACT_NAME &
+
+    - upload_pid=$!
+    - wait $upload_pid
+
+    - existing_app=$(aws elasticbeanstalk describe-applications --application-names $APP_NAME --output text --query 'Applications[*].ApplicationName')
+    
+    - if [ -z "$existing_app" ]; then
+        echo "Application does not exist. Creating...";
+        aws elasticbeanstalk create-application --application-name $APP_NAME;
+      else
+        echo "Application already exists. Updating...";
+        aws elasticbeanstalk create-application-version --application-name $APP_NAME --version-label $CI_PIPELINE_IID --source-bundle S3Bucket=$S3_BUCKET,S3Key=$ARTIFACT_NAME;
+      fi
+
+
+    - aws elasticbeanstalk update-environment --application-name $APP_NAME --environment-name "java-movie-app" --version-label $CI_PIPELINE_IID;
+    # - existing_env=$(aws elasticbeanstalk describe-environments --application-name $APP_NAME --environment-names "java-movie-app" --output text --query 'Environments[*].EnvironmentName')
+    # - if [ -z "$existing_env" ]; then
+    #     echo "Environment does not exist. Creating...";
+    #     aws elasticbeanstalk create-environment --application-name $APP_NAME --environment-name "java-movie-app" --solution-stack-name "64bit Amazon Linux 2023 v4.2.0 running Corretto 17" --option-settings Namespace=aws:elasticbeanstalk:environment,OptionName=IamInstanceProfile,Value=aws-elasticbeanstalk-ec2-role;
+    #   else
+    #     echo "Environment already exists.";
+        
+    #   fi
+
+    
